@@ -2,6 +2,8 @@ import { logger } from "@truffle/db/logger";
 const debug = logger("db:resources:projects");
 
 import gql from "graphql-tag";
+import graphql from "graphql";
+import { delegateToSchema } from "graphql-tools";
 
 import { Definition, IdObject, Workspace } from "./types";
 
@@ -26,11 +28,21 @@ export const projects: Definition<"projects"> = {
       network(name: String!): Network
       networks: [Network]!
 
+      contractInstance(
+        contract: NameInput!
+        network: NameInput!
+      ): ContractInstance
+      contractInstances(network: NameInput!): [ContractInstance]
+
       resolve(type: String, name: String): [NameRecord] # null means unknown type
     }
 
     input ProjectInput {
       directory: String!
+    }
+
+    input NameInput {
+      name: String!
     }
   `,
   resolvers: {
@@ -143,6 +155,166 @@ export const projects: Definition<"projects"> = {
 
           debug("Resolved Project.contracts.");
           return result;
+        }
+      },
+      contractInstance: {
+        async resolve({ id }, args, { workspace }, info) {
+          debug("Resolving Project.contractInstance...");
+
+          const project = await delegateToSchema({
+            schema: info.schema,
+            operation: "query",
+            fieldName: "project",
+            returnType: info.schema.getType(
+              "Project"
+            ) as graphql.GraphQLOutputType,
+            args: { id },
+            selectionSet: extractSelectionSet(gql`{
+              network(name: "${args.network.name}") {
+                contractInstances {
+                  id
+                  contract {
+                    id
+                  }
+                  network {
+                    historicBlock {
+                      height
+                    }
+                  }
+                }
+              }
+
+              contractsNameRecords: resolve(
+                type: "Contract"
+                name: "${args.contract.name}"
+              ) {
+                history(includeSelf: true) {
+                  resource {
+                    id
+                  }
+                }
+              }
+            }`),
+            context: { workspace },
+            info
+          });
+
+          const {
+            network,
+            contractsNameRecords: [contractNameRecord]
+          } = project;
+
+          if (!network || !contractNameRecord) {
+            return;
+          }
+
+          const { history: contractHistory } = contractNameRecord;
+
+          const contractInstanceIdsByContractId = network.contractInstances
+            .sort(
+              (a, b) =>
+                a.network.historicBlock.height - b.network.historicBlock.height
+            )
+            .map(({ id, contract }) => ({
+              [contract.id]: id
+            }))
+            .reduce((a, b) => ({ ...a, ...b }), {});
+
+          for (const {
+            resource: { id }
+          } of contractHistory) {
+            const contractInstanceId = contractInstanceIdsByContractId[id];
+
+            if (contractInstanceId) {
+              debug("Resolved Project.contractInstance.");
+              return await workspace.get(
+                "contractInstances",
+                contractInstanceId
+              );
+            }
+          }
+        }
+      },
+      contractInstances: {
+        async resolve({ id }, args, { workspace }, info) {
+          debug("Resolving Project.contractInstance...");
+
+          const project = await delegateToSchema({
+            schema: info.schema,
+            operation: "query",
+            fieldName: "project",
+            returnType: info.schema.getType(
+              "Project"
+            ) as graphql.GraphQLOutputType,
+            args: { id },
+            selectionSet: extractSelectionSet(gql`{
+              network(name: "${args.network.name}") {
+                contractInstances {
+                  id
+                  contract {
+                    id
+                  }
+                  network {
+                    historicBlock {
+                      height
+                    }
+                  }
+                }
+              }
+
+              contractsNameRecords: resolve(type: "Contract") {
+                history(includeSelf: true) {
+                  resource {
+                    id
+                  }
+                }
+              }
+            }`),
+            context: { workspace },
+            info
+          });
+          debug("project %o", project);
+
+          const { network, contractsNameRecords } = project;
+
+          const contractsHistory = contractsNameRecords.map(
+            ({ history }) => history
+          );
+
+          if (!network) {
+            return;
+          }
+
+          const contractInstanceIdsByContractId = network.contractInstances
+            .sort(
+              (a, b) =>
+                a.network.historicBlock.height - b.network.historicBlock.height
+            )
+            .map(({ id, contract }) => ({
+              [contract.id]: id
+            }))
+            .reduce((a, b) => ({ ...a, ...b }), {});
+
+          const contractInstanceIds = [];
+          for (const contractHistory of contractsHistory) {
+            for (const {
+              resource: { id }
+            } of contractHistory) {
+              const contractInstanceId = contractInstanceIdsByContractId[id];
+
+              if (contractInstanceId) {
+                contractInstanceIds.push(contractInstanceId);
+                break;
+              }
+            }
+          }
+
+          const contractInstances = await workspace.find("contractInstances", {
+            selector: { id: { $in: contractInstanceIds } }
+          });
+
+          debug("Resolved Project.contractInstance.");
+          return contractInstances;
         }
       }
     }
